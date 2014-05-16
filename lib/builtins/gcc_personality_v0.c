@@ -1,6 +1,6 @@
 /* ===-- gcc_personality_v0.c - Implement __gcc_personality_v0 -------------===
  *
- *      	       The LLVM Compiler Infrastructure
+ *                 The LLVM Compiler Infrastructure
  *
  * This file is dual licensed under the MIT and the University of Illinois Open
  * Source Licenses. See LICENSE.TXT for details.
@@ -46,11 +46,11 @@ struct _Unwind_Exception {
     uintptr_t                private_2;    
 };
 
-extern const uint8_t*    _Unwind_GetLanguageSpecificData(_Unwind_Context_t c);
-extern void              _Unwind_SetGR(_Unwind_Context_t c, int i, uintptr_t n);
-extern void              _Unwind_SetIP(_Unwind_Context_t, uintptr_t new_value);
-extern uintptr_t         _Unwind_GetIP(_Unwind_Context_t context);
-extern uintptr_t         _Unwind_GetRegionStart(_Unwind_Context_t context);
+COMPILER_RT_ABI  const uint8_t*    _Unwind_GetLanguageSpecificData(_Unwind_Context_t c);
+COMPILER_RT_ABI  void              _Unwind_SetGR(_Unwind_Context_t c, int i, uintptr_t n);
+COMPILER_RT_ABI  void              _Unwind_SetIP(_Unwind_Context_t, uintptr_t new_value);
+COMPILER_RT_ABI  uintptr_t         _Unwind_GetIP(_Unwind_Context_t context);
+COMPILER_RT_ABI  uintptr_t         _Unwind_GetRegionStart(_Unwind_Context_t context);
 
 
 /*
@@ -107,34 +107,34 @@ static uintptr_t readEncodedPointer(const uint8_t** data, uint8_t encoding)
     /* first get value */
     switch (encoding & 0x0F) {
         case DW_EH_PE_absptr:
-            result = *((uintptr_t*)p);
+            result = *((const uintptr_t*)p);
             p += sizeof(uintptr_t);
             break;
         case DW_EH_PE_uleb128:
             result = readULEB128(&p);
             break;
         case DW_EH_PE_udata2:
-            result = *((uint16_t*)p);
+            result = *((const uint16_t*)p);
             p += sizeof(uint16_t);
             break;
         case DW_EH_PE_udata4:
-            result = *((uint32_t*)p);
+            result = *((const uint32_t*)p);
             p += sizeof(uint32_t);
             break;
         case DW_EH_PE_udata8:
-            result = *((uint64_t*)p);
+            result = *((const uint64_t*)p);
             p += sizeof(uint64_t);
             break;
         case DW_EH_PE_sdata2:
-            result = *((int16_t*)p);
+            result = *((const int16_t*)p);
             p += sizeof(int16_t);
             break;
         case DW_EH_PE_sdata4:
-            result = *((int32_t*)p);
+            result = *((const int32_t*)p);
             p += sizeof(int32_t);
             break;
         case DW_EH_PE_sdata8:
-            result = *((int64_t*)p);
+            result = *((const int64_t*)p);
             p += sizeof(int64_t);
             break;
         case DW_EH_PE_sleb128:
@@ -164,7 +164,7 @@ static uintptr_t readEncodedPointer(const uint8_t** data, uint8_t encoding)
 
     /* then apply indirection */
     if (encoding & DW_EH_PE_indirect) {
-        result = *((uintptr_t*)result);
+        result = *((const uintptr_t*)result);
     }
 
     *data = p;
@@ -180,13 +180,13 @@ static uintptr_t readEncodedPointer(const uint8_t** data, uint8_t encoding)
  * on each frame as the stack is unwound during a C++ exception
  * throw through a C function compiled with -fexceptions.
  */
-#if __arm__
+#if __USING_SJLJ_EXCEPTIONS__
 // the setjump-longjump based exceptions personality routine has a different name
-_Unwind_Reason_Code __gcc_personality_sj0(int version, _Unwind_Action actions,
+COMPILER_RT_ABI _Unwind_Reason_Code __gcc_personality_sj0(int version, _Unwind_Action actions,
          uint64_t exceptionClass, struct _Unwind_Exception* exceptionObject,
          _Unwind_Context_t context)
 #else
-_Unwind_Reason_Code __gcc_personality_v0(int version, _Unwind_Action actions,
+COMPILER_RT_ABI _Unwind_Reason_Code __gcc_personality_v0(int version, _Unwind_Action actions,
          uint64_t exceptionClass, struct _Unwind_Exception* exceptionObject,
          _Unwind_Context_t context)
 #endif
@@ -201,47 +201,102 @@ _Unwind_Reason_Code __gcc_personality_v0(int version, _Unwind_Action actions,
     if ( lsda == (uint8_t*) 0 )
         return _URC_CONTINUE_UNWIND;
 
-    uintptr_t pc = _Unwind_GetIP(context)-1;
+    // Get the current instruction pointer and offset it before next
+    // instruction in the current frame which threw the exception.
+    uintptr_t ip = _Unwind_GetIP(context) - 1;
+    // Get beginning current frame's code (as defined by the 
+    // emitted dwarf code)
     uintptr_t funcStart = _Unwind_GetRegionStart(context);
-    uintptr_t pcOffset = pc - funcStart;
 
-    /* Parse LSDA header. */
+    uintptr_t resumeIp = 0;
+#if __USING_SJLJ_EXCEPTIONS__
+    if (ip == (uintptr_t)-1)
+    {
+        // no action
+        return _URC_CONTINUE_UNWIND;
+    }
+    else if (ip == 0)
+        return _URC_FATAL_PHASE2_ERROR;
+    // ip is 1-based index into call site table
+#else  // !__USING_SJLJ_EXCEPTIONS__
+    uintptr_t ipOffset = ip - funcStart;
+#endif  // !defined(_USING_SLJL_EXCEPTIONS__)
+    // Note: See JITDwarfEmitter::EmitExceptionTable(...) for corresponding
+    //       dwarf emission
+    // Parse LSDA header.
+    const uint8_t* lpStart = 0;
+
     uint8_t lpStartEncoding = *lsda++;
-    if (lpStartEncoding != DW_EH_PE_omit) {
-        readEncodedPointer(&lsda, lpStartEncoding); 
-    }
+    if (lpStartEncoding != DW_EH_PE_omit)
+        lpStart = (const uint8_t*)readEncodedPointer(&lsda, lpStartEncoding);
+
+    if (lpStart == 0)
+        lpStart = (const uint8_t*)funcStart;
+
     uint8_t ttypeEncoding = *lsda++;
-    if (ttypeEncoding != DW_EH_PE_omit) {
-        readULEB128(&lsda);  
+    if (ttypeEncoding != DW_EH_PE_omit)
+    {
+        // Calculate type info locations in emitted dwarf code which
+        // were flagged by type info arguments to llvm.eh.selector
+        // intrinsic
+        readULEB128(&lsda);
     }
-    /* Walk call-site table looking for range that includes current PC. */
-    uint8_t         callSiteEncoding = *lsda++;
-    uint32_t        callSiteTableLength = readULEB128(&lsda);
-    const uint8_t*  callSiteTableStart = lsda;
-    const uint8_t*  callSiteTableEnd = callSiteTableStart + callSiteTableLength;
-    const uint8_t* p=callSiteTableStart;
-    while (p < callSiteTableEnd) {
-        uintptr_t start = readEncodedPointer(&p, callSiteEncoding);
-        uintptr_t length = readEncodedPointer(&p, callSiteEncoding);
-        uintptr_t landingPad = readEncodedPointer(&p, callSiteEncoding);
-        readULEB128(&p); /* action value not used for C code */
-        if ( landingPad == 0 )
-            continue; /* no landing pad for this entry */
-        if ( (start <= pcOffset) && (pcOffset < (start+length)) ) {
+    // Walk call-site table looking for range that 
+    // includes current PC. 
+    uint8_t callSiteEncoding = *lsda++;
+#if __USING_SJLJ_EXCEPTIONS__
+    (void)callSiteEncoding;  // When using SjLj exceptions, callSiteEncoding is never used
+#endif
+    uint32_t callSiteTableLength = readULEB128(&lsda);
+    const uint8_t* callSiteTableStart = lsda;
+    const uint8_t* callSiteTableEnd = callSiteTableStart + callSiteTableLength;
+    const uint8_t* callSitePtr = callSiteTableStart;
+    while (callSitePtr < callSiteTableEnd)
+    {
+        // There is one entry per call site.
+#if !__USING_SJLJ_EXCEPTIONS__
+        // The call sites are non-overlapping in [start, start+length)
+        // The call sites are ordered in increasing value of start
+        uintptr_t start = readEncodedPointer(&callSitePtr, callSiteEncoding);
+        uintptr_t length = readEncodedPointer(&callSitePtr, callSiteEncoding);
+        uintptr_t landingPad = readEncodedPointer(&callSitePtr, callSiteEncoding);
+        uintptr_t actionEntry = readULEB128(&callSitePtr);
+        (void)actionEntry; // action is ignored for C code
+        if (landingPad == 0)
+            continue;
+
+        if ((start <= ipOffset) && (ipOffset < (start + length)))
+#else  // __USING_SJLJ_EXCEPTIONS__
+        // ip is 1-based index into this table
+        uintptr_t landingPad = readULEB128(&callSitePtr);
+        uintptr_t actionEntry = readULEB128(&callSitePtr);
+        (void)actionEntry; // action is ignored for C code
+        if (--ip == 0)
+#endif  // __USING_SJLJ_EXCEPTIONS__
+        {
+            // Found the call site containing ip.
+#if !__USING_SJLJ_EXCEPTIONS__
             /* Found landing pad for the PC.
-             * Set Instruction Pointer to so we re-enter function 
+             * Set Instruction Pointer to so we re-enter function
              * at landing pad. The landing pad is created by the compiler
              * to take two parameters in registers.
-	     */
-            _Unwind_SetGR(context, __builtin_eh_return_data_regno(0), 
-                                                (uintptr_t)exceptionObject);
-            _Unwind_SetGR(context, __builtin_eh_return_data_regno(1), 0);
-            _Unwind_SetIP(context, funcStart+landingPad);
-            return _URC_INSTALL_CONTEXT;
+            */
+            resumeIp = (uintptr_t)lpStart + landingPad;
+            break;
+#else  // __USING_SJLJ_EXCEPTIONS__
+            resumeIp = ++landingPad;
+#endif  // __USING_SJLJ_EXCEPTIONS__
         }
+    } 
+
+    if (resumeIp == 0)
+        return _URC_CONTINUE_UNWIND;
+    else
+    {
+        _Unwind_SetGR(context, __builtin_eh_return_data_regno (0), (uintptr_t)exceptionObject);
+        _Unwind_SetGR(context, __builtin_eh_return_data_regno (1), 0);
+        _Unwind_SetIP(context, resumeIp);
+        return _URC_INSTALL_CONTEXT;
     }
-    
-    /* No landing pad found, continue unwinding. */
-    return _URC_CONTINUE_UNWIND;
 }
 
