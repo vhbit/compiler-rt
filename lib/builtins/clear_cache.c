@@ -7,6 +7,8 @@
  *
  * ===----------------------------------------------------------------------===
  */
+#if __APPLE__
+#else
 
 #include "int_lib.h"
 
@@ -26,9 +28,9 @@
 #endif
 
 /*
- * The compiler generates calls to __clear_cache() when creating 
+ * The compiler generates calls to __clear_cache() when creating
  * trampoline functions on the stack for use with nested functions.
- * It is expected to invalidate the instruction cache for the 
+ * It is expected to invalidate the instruction cache for the
  * specified range.
  */
 
@@ -96,3 +98,4 @@ __clear_cache(void* start, void* end)
 #endif
 }
 
+#endif
